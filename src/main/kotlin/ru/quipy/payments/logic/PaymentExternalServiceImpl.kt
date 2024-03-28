@@ -16,27 +16,30 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 
 
 internal class RateLimitInterceptor(
     private val rate: Int,
     private val timeUnit: TimeUnit = TimeUnit.SECONDS
 ) : Interceptor {
+    private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
     private val rateLimiter: RateLimiter = RateLimiter(rate, timeUnit)
 
     @Throws(IOException::class)
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         rateLimiter.tickBlocking()
-        val response = chain.proceed(request)
 
-        return response
+        return chain.proceed(request)
     }
 }
 
 internal class WindowControlInterceptor(
     maxWinSize: Int
 ) : Interceptor {
+    private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
     private val window: OngoingWindow = OngoingWindow(maxWinSize)
 
     @Throws(IOException::class)
@@ -88,11 +91,11 @@ internal class RequestProcessingTimeInterceptor(
 // Advice: always treat time as a Duration
 class PaymentExternalServiceImpl(
     private val properties: ExternalServiceProperties,
+    private val fasterService: PaymentExternalServiceImpl?
 ) : PaymentExternalService {
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
-        val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 4)
 
         val paymentOperationTimeout = Duration.ofSeconds(80)
 
@@ -106,43 +109,59 @@ class PaymentExternalServiceImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
     private val rateLimitInterceptor = RateLimitInterceptor(rateLimitPerSec)
+    private val speed: Int = min(parallelRequests.toDouble() / requestAverageProcessingTime.toMillis(), rateLimitPerSec.toDouble()).toInt()
     private val windowControlInterceptor = WindowControlInterceptor(parallelRequests)
     private val requestProcessingTimeInterceptor = RequestProcessingTimeInterceptor(requestAverageProcessingTime, paymentOperationTimeout)
+    private val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
+    private var requestCount = AtomicLong(0)
+    var failedCount = 0
+
+    fun GetSpeed() = speed
+    fun GetRequestCount() = requestCount.get()
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
-    private val httpClientExecutor = Executors.newSingleThreadExecutor()
+//    private val httpClientExecutor = Executors.newSingleThreadExecutor()
 
     private val client = OkHttpClient.Builder().run {
-        dispatcher(Dispatcher(httpClientExecutor))
+        dispatcher(Dispatcher(threadPool))
         addInterceptor(requestProcessingTimeInterceptor)
-        addNetworkInterceptor(rateLimitInterceptor)
-        addNetworkInterceptor(windowControlInterceptor)
+        addInterceptor(rateLimitInterceptor)
+        addInterceptor(windowControlInterceptor)
         build()
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
-        logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
-
-        val transactionId = UUID.randomUUID()
-        logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
-
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        val time1 = GetSpeed() * (paymentOperationTimeout.toMillis() - (now() - paymentStartedAt))
+//        val time2 = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
+        if (time1 < GetRequestCount() && fasterService != null) {
+            fasterService.submitPaymentRequest(paymentId, amount, paymentStartedAt)
+            return
         }
+        threadPool.submit {
 
-        val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
-            header("paymentStartedAt", paymentStartedAt.toString())
-            post(emptyBody)
-        }.build()
+            logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
 
-//        threadPool.submit {
+            val transactionId = UUID.randomUUID()
+            logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
+
+            // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+            // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+            }
+
+            val request = Request.Builder().run {
+                url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
+                header("paymentStartedAt", paymentStartedAt.toString())
+                post(emptyBody)
+            }.build()
+
+            requestCount.incrementAndGet()
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
+                    requestCount.decrementAndGet()
                     when (e) {
                         is SocketTimeoutException -> {
                             paymentESService.update(paymentId) {
@@ -151,7 +170,10 @@ class PaymentExternalServiceImpl(
                         }
 
                         else -> {
-                            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                            logger.error(
+                                "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId",
+                                e
+                            )
 
                             paymentESService.update(paymentId) {
                                 it.logProcessing(false, now(), transactionId, reason = e.message)
@@ -161,10 +183,12 @@ class PaymentExternalServiceImpl(
                 }
 
                 override fun onResponse(call: Call, response: Response) {
+                    requestCount.decrementAndGet()
                     response.use {
                         val body = try {
                             mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                         } catch (e: Exception) {
+                            failedCount += 1
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                             ExternalSysResponse(false, e.message)
                         }
@@ -179,10 +203,8 @@ class PaymentExternalServiceImpl(
                     }
                 }
             })
-//        }
 
-
-
+        }
     }
 }
 
