@@ -23,6 +23,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 100,
             request95thPercentileProcessingTime = Duration.ofMillis(1000),
         )
+        private val paymentService_1 = PaymentExternalServiceImpl(accountProps_1)
 
         private val accountProps_2 = ExternalServiceProperties(
             // Call costs 70
@@ -32,6 +33,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 30,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_2 = PaymentExternalServiceImpl(accountProps_2)
 
         private val accountProps_3 = ExternalServiceProperties(
             // Call costs 40
@@ -41,6 +43,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 8,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_3 = PaymentExternalServiceImpl(accountProps_3)
 
         // Call costs 30
         private val accountProps_4 = ExternalServiceProperties(
@@ -50,11 +53,13 @@ class ExternalServicesConfig {
             rateLimitPerSec = 5,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_4 = PaymentExternalServiceImpl(accountProps_4)
+
     }
 
     @Bean(PRIMARY_PAYMENT_BEAN)
-    fun fastExternalService() =
-        PaymentExternalServiceImpl(
-            accountProps_4,
-        )
+    fun fastExternalService(): PaymentExternalServiceImpl {
+        return paymentService_4
+    }
+
 }
