@@ -10,7 +10,8 @@ import java.time.Duration
 @Configuration
 class ExternalServicesConfig {
     companion object {
-        const val PRIMARY_PAYMENT_BEAN = "PRIMARY_PAYMENT_BEAN"
+        const val PRIMARY_PAYMENT_BEAN1 = "PRIMARY_PAYMENT_BEAN1"
+        const val PRIMARY_PAYMENT_BEAN2 = "PRIMARY_PAYMENT_BEAN2"
 
         // Ниже приведены готовые конфигурации нескольких аккаунтов провайдера оплаты.
         // Заметьте, что каждый аккаунт обладает своими характеристиками и стоимостью вызова.
@@ -23,7 +24,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 100,
             request95thPercentileProcessingTime = Duration.ofMillis(1000),
         )
-        private val paymentService_1 = PaymentExternalServiceImpl(accountProps_1, null)
+        private val paymentService_1 = PaymentExternalServiceImpl(accountProps_1)
 
         private val accountProps_2 = ExternalServiceProperties(
             // Call costs 70
@@ -31,35 +32,35 @@ class ExternalServicesConfig {
             "default-2",
             parallelRequests = 100,
             rateLimitPerSec = 30,
-            request95thPercentileProcessingTime = Duration.ofMillis(10_000),
+            request95thPercentileProcessingTime = Duration.ofMillis(10000),
         )
-        private val paymentService_2 = PaymentExternalServiceImpl(accountProps_2, paymentService_1)
+        private val paymentService_2 = PaymentExternalServiceImpl(accountProps_2)
 
-        private val accountProps_3 = ExternalServiceProperties(
-            // Call costs 40
-            "test",
-            "default-3",
-            parallelRequests = 30,
-            rateLimitPerSec = 8,
-            request95thPercentileProcessingTime = Duration.ofMillis(10_000),
-        )
-        private val paymentService_3 = PaymentExternalServiceImpl(accountProps_3, paymentService_2)
+//            private val accountProps_3 = ExternalServiceProperties(
+//                // Call costs 40
+//                "test",
+//                "default-3",
+//                parallelRequests = 30,
+//                rateLimitPerSec = 8,
+//                request95thPercentileProcessingTime = Duration.ofMillis(10_000),
+//            )
+//            private val paymentService_3 = PaymentExternalServiceImpl(accountProps_3)
+//
+//            // Call costs 30
+//            private val accountProps_4 = ExternalServiceProperties(
+//                "test",
+//                "default-4",
+//                parallelRequests = 8,
+//                rateLimitPerSec = 5,
+//                request95thPercentileProcessingTime = Duration.ofMillis(10_000),
+//            )
+//            private val paymentService_4 = PaymentExternalServiceImpl(accountProps_4)
 
-        // Call costs 30
-        private val accountProps_4 = ExternalServiceProperties(
-            "test",
-            "default-4",
-            parallelRequests = 8,
-            rateLimitPerSec = 5,
-            request95thPercentileProcessingTime = Duration.ofMillis(10_000),
-        )
-        private val paymentService_4 = PaymentExternalServiceImpl(accountProps_4, paymentService_3)
+        }
 
-    }
-
-    @Bean(PRIMARY_PAYMENT_BEAN)
-    fun fastExternalService(): PaymentExternalServiceImpl {
-        return paymentService_2
-    }
+    @Bean(PRIMARY_PAYMENT_BEAN2)
+    fun fastExternalService2() = paymentService_2
+    @Bean(PRIMARY_PAYMENT_BEAN1)
+    fun fastExternalService1() = paymentService_1
 
 }

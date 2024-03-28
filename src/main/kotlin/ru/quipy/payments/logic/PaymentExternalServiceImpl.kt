@@ -37,7 +37,7 @@ internal class RateLimitInterceptor(
 }
 
 internal class WindowControlInterceptor(
-    maxWinSize: Int
+    private val maxWinSize: Int
 ) : Interceptor {
     private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
     private val window: OngoingWindow = OngoingWindow(maxWinSize)
@@ -47,12 +47,8 @@ internal class WindowControlInterceptor(
         val request = chain.request()
         window.acquire()
         val response: Response
-        try {
-            response = chain.proceed(request)
-        }
-        finally {
-            window.release()
-        }
+        response = chain.proceed(request)
+        window.release()
 
         return response
     }
@@ -71,8 +67,8 @@ internal class RequestProcessingTimeInterceptor(
         val paymentStartedAtHeader = request.header("paymentStartedAt")
         if (paymentStartedAtHeader != null) {
             val paymentStartedAt = paymentStartedAtHeader.toLong()
-            val remainingTime = paymentOperationTimeout.toMillis() - requestAverageProcessingTime.toMillis()
-            if (now() - paymentStartedAt > remainingTime) {
+            val remainingTime = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
+            if (requestAverageProcessingTime.toMillis() > remainingTime) {
                 logger.warn("RequestProcessingTimeInterceptor")
                 return Response.Builder()
                     .code(418) // Whatever code
@@ -90,8 +86,7 @@ internal class RequestProcessingTimeInterceptor(
 
 // Advice: always treat time as a Duration
 class PaymentExternalServiceImpl(
-    private val properties: ExternalServiceProperties,
-    private val fasterService: PaymentExternalServiceImpl?
+    properties: ExternalServiceProperties
 ) : PaymentExternalService {
 
     companion object {
@@ -109,38 +104,44 @@ class PaymentExternalServiceImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
     private val rateLimitInterceptor = RateLimitInterceptor(rateLimitPerSec)
-    private val speed: Int = min(parallelRequests.toDouble() / requestAverageProcessingTime.toMillis(), rateLimitPerSec.toDouble()).toInt()
+    private var speed: Int = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble()).toInt()
     private val windowControlInterceptor = WindowControlInterceptor(parallelRequests)
     private val requestProcessingTimeInterceptor = RequestProcessingTimeInterceptor(requestAverageProcessingTime, paymentOperationTimeout)
-    private val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
+    private val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2)
     private var requestCount = AtomicLong(0)
     var failedCount = 0
 
-    fun GetSpeed() = speed
-    fun GetRequestCount() = requestCount.get()
+    override fun GetSpeed() = speed
+    override fun GetRequestCount() = requestCount.get()
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
 //    private val httpClientExecutor = Executors.newSingleThreadExecutor()
 
-    private val client = OkHttpClient.Builder().run {
-        dispatcher(Dispatcher(threadPool))
-        addInterceptor(requestProcessingTimeInterceptor)
-        addInterceptor(rateLimitInterceptor)
-        addInterceptor(windowControlInterceptor)
-        build()
+    private lateinit var client: OkHttpClient
+
+    init {
+        val dispatcher = Dispatcher(Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 16))
+        dispatcher.maxRequests = 1000000
+        dispatcher.maxRequestsPerHost = 1000000
+        client = OkHttpClient.Builder().run {
+            dispatcher(dispatcher)
+            addInterceptor(windowControlInterceptor)
+            addInterceptor(rateLimitInterceptor)
+            addInterceptor(requestProcessingTimeInterceptor)
+            build()
+        }
     }
 
-    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
-        val time1 = GetSpeed() * (paymentOperationTimeout.toMillis() - (now() - paymentStartedAt))
-//        val time2 = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
-        if (time1 < GetRequestCount() && fasterService != null) {
-            fasterService.submitPaymentRequest(paymentId, amount, paymentStartedAt)
-            return
-        }
-        threadPool.submit {
+    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long): Boolean {
+        val ticket = requestCount.incrementAndGet()
+        val t = GetSpeed() * ((paymentOperationTimeout.toMillis() - (now() - paymentStartedAt) - 2*requestAverageProcessingTime.toMillis()).toDouble() / 1000).toLong()
+        if (ticket > t * 0.8)
+            return false
+        logger.warn("t - $t; ticket - $ticket")
 
+        threadPool.submit {
             logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
 
             val transactionId = UUID.randomUUID()
@@ -158,10 +159,8 @@ class PaymentExternalServiceImpl(
                 post(emptyBody)
             }.build()
 
-            requestCount.incrementAndGet()
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    requestCount.decrementAndGet()
                     when (e) {
                         is SocketTimeoutException -> {
                             paymentESService.update(paymentId) {
@@ -180,10 +179,10 @@ class PaymentExternalServiceImpl(
                             }
                         }
                     }
+                    requestCount.decrementAndGet()
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    requestCount.decrementAndGet()
                     response.use {
                         val body = try {
                             mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -201,10 +200,11 @@ class PaymentExternalServiceImpl(
                             it.logProcessing(body.result, now(), transactionId, reason = body.message)
                         }
                     }
+                    requestCount.decrementAndGet()
                 }
             })
-
         }
+        return true
     }
 }
 
