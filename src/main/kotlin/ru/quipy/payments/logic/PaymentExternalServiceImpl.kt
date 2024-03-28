@@ -136,8 +136,8 @@ class PaymentExternalServiceImpl(
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long): Boolean {
         val ticket = requestCount.incrementAndGet()
-        val t = GetSpeed() * ((paymentOperationTimeout.toMillis() - (now() - paymentStartedAt) - 2*requestAverageProcessingTime.toMillis()).toDouble() / 1000).toLong()
-        if (ticket > t * 0.8)
+        val t = GetSpeed() * ((paymentOperationTimeout.toMillis() - (now() - paymentStartedAt) - requestAverageProcessingTime.toMillis()).toDouble() / 1000).toLong()
+        if (ticket > t)
             return false
         logger.warn("t - $t; ticket - $ticket")
 
