@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.autoconfigure.mongo.MongoClientSettingsBuilderCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Scope
 import ru.quipy.core.EventSourcingServiceFactory
 import ru.quipy.delivery.api.DeliveryAggregate
 import ru.quipy.delivery.logic.DeliveryAggregateState

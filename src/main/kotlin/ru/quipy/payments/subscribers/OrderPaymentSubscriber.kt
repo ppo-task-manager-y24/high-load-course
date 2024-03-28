@@ -11,9 +11,7 @@ import ru.quipy.orders.api.OrderAggregate
 import ru.quipy.orders.api.OrderPaymentStartedEvent
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.ExternalServicesConfig
-import ru.quipy.payments.logic.PaymentAggregateState
-import ru.quipy.payments.logic.PaymentService
-import ru.quipy.payments.logic.create
+import ru.quipy.payments.logic.*
 import ru.quipy.streams.AggregateSubscriptionsManager
 import ru.quipy.streams.annotation.RetryConf
 import ru.quipy.streams.annotation.RetryFailedStrategy
@@ -33,8 +31,11 @@ class OrderPaymentSubscriber {
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
     @Autowired
-    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN)
-    private lateinit var paymentService: PaymentService
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN1)
+    private lateinit var paymentService1: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN2)
+    private lateinit var paymentService2: PaymentService
 
     private val paymentExecutor = Executors.newFixedThreadPool(16, NamedThreadFactory("payment-executor"))
 
@@ -52,7 +53,13 @@ class OrderPaymentSubscriber {
                     }
                     logger.info("Payment ${createdEvent.paymentId} for order ${event.orderId} created.")
 
-                    paymentService.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+//                    val t = paymentService2.GetSpeed() * ((PaymentExternalServiceImpl.paymentOperationTimeout.toMillis() - (now() - event.createdAt)).toDouble() / 1000 - 10).toLong()
+                    if (!paymentService2.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
+                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+//                    if (t < 4 * paymentService2.GetRequestCount())
+//                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+//                    else
+//                        paymentService2.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
                 }
             }
         }
