@@ -3,7 +3,7 @@ package ru.quipy.common.utils
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicLong
 
-class Summary(private val initial: Double, private val activeAfterNExecutions: Int = 30) {
+class Summary(private val activeAfterNExecutions: Int = 30) {
     private val sum = AtomicLong(0)
     private val count = AtomicLong(0)
     fun reportExecution(duration: Duration) {

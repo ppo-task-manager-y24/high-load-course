@@ -7,9 +7,8 @@ interface PaymentService {
     /**
      * Submit payment request to external service.
      */
-    fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) : Boolean
-    fun GetSpeed() : Int
-    fun GetRequestCount() : Long
+    fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long): Boolean
+    fun GetSpeed() : Double
 }
 
 interface PaymentExternalService : PaymentService

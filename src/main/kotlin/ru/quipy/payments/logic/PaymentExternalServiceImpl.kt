@@ -2,63 +2,38 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import kotlinx.coroutines.flow.callbackFlow
 import okhttp3.*
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
+import ru.quipy.common.utils.Summary
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
-
-
-internal class RateLimitInterceptor(
-    private val rate: Int,
-    private val timeUnit: TimeUnit = TimeUnit.SECONDS
-) : Interceptor {
-    private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
-    private val rateLimiter: RateLimiter = RateLimiter(rate, timeUnit)
-
-    @Throws(IOException::class)
-    override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        rateLimiter.tickBlocking()
-
-        return chain.proceed(request)
-    }
-}
-
-internal class WindowControlInterceptor(
-    private val maxWinSize: Int
-) : Interceptor {
-    private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
-    private val window: OngoingWindow = OngoingWindow(maxWinSize)
-
-    @Throws(IOException::class)
-    override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        window.acquire()
-        val response: Response
-        response = chain.proceed(request)
-        window.release()
-
-        return response
-    }
-}
 
 internal class RequestProcessingTimeInterceptor(
     private val requestAverageProcessingTime: Duration,
     private val paymentOperationTimeout: Duration
 ) : Interceptor {
     private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
+    // calc percentile
+    private val summary = Summary()
+    private var minProcessingTime1: Long = Long.MAX_VALUE
+    private var minProcessingTime2: Long = Long.MAX_VALUE
+    private var lastUpdMin: Long = now()
 
     @Throws(IOException::class)
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -68,7 +43,10 @@ internal class RequestProcessingTimeInterceptor(
         if (paymentStartedAtHeader != null) {
             val paymentStartedAt = paymentStartedAtHeader.toLong()
             val remainingTime = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
-            if (requestAverageProcessingTime.toMillis() > remainingTime) {
+            val minn = min(minProcessingTime1, minProcessingTime2)
+//            val average = summary.getAverageMillis()
+            if (minProcessingTime1 != Long.MAX_VALUE && minn > remainingTime) {
+//            if (average != null && average.toMillis() * 0.1 > remainingTime) {
                 logger.warn("RequestProcessingTimeInterceptor")
                 return Response.Builder()
                     .code(418) // Whatever code
@@ -80,7 +58,26 @@ internal class RequestProcessingTimeInterceptor(
             }
         }
 
-        return chain.proceed(request)
+        val startProcessingAt = now()
+        val response = chain.proceed(request)
+        summary.reportExecution(now() - startProcessingAt)
+        minProcessingTime2 = min(minProcessingTime2, now() - startProcessingAt)
+
+        if (now() - lastUpdMin < 10000)
+        {
+            minProcessingTime1 = minProcessingTime2
+            minProcessingTime2 = Long.MAX_VALUE
+            lastUpdMin = now()
+        }
+
+        return response
+    }
+
+    fun GetAverage(): Long? {
+        val average = summary.getAverageMillis()
+        if (average != null)
+            return average.toMillis()
+        return null
     }
 }
 
@@ -103,64 +100,75 @@ class PaymentExternalServiceImpl(
     private val requestAverageProcessingTime = properties.request95thPercentileProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private val rateLimitInterceptor = RateLimitInterceptor(rateLimitPerSec)
-    private var speed: Int = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble()).toInt()
-    private val windowControlInterceptor = WindowControlInterceptor(parallelRequests)
+    private var speed: Double = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble())
     private val requestProcessingTimeInterceptor = RequestProcessingTimeInterceptor(requestAverageProcessingTime, paymentOperationTimeout)
-    private val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2)
-    private var requestCount = AtomicLong(0)
-    var failedCount = 0
+    private val responseProcessingThreadPool = ThreadPoolExecutor(
+        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors(), 10, TimeUnit.SECONDS,
+        ArrayBlockingQueue(10000),
+        NamedThreadFactory("response-$accountName"),
+        ThreadPoolExecutor.DiscardOldestPolicy()
+    )
+    private val window = OngoingWindow(parallelRequests)
+
+    private var queue = AccountQueue(
+        properties.accountName,
+        GetSpeed(),
+        paymentOperationTimeout.seconds,
+        requestAverageProcessingTime.toMillis(),
+        RateLimiter(rateLimitPerSec),
+        window,
+        ::paymentRequest
+    )
 
     override fun GetSpeed() = speed
-    override fun GetRequestCount() = requestCount.get()
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
-//    private val httpClientExecutor = Executors.newSingleThreadExecutor()
-
     private lateinit var client: OkHttpClient
 
     init {
-        val dispatcher = Dispatcher(Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 16))
-        dispatcher.maxRequests = 1000000
-        dispatcher.maxRequestsPerHost = 1000000
+        val executor = ThreadPoolExecutor(
+            Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 8, 10, TimeUnit.SECONDS,
+            ArrayBlockingQueue(10000),
+            ThreadPoolExecutor.DiscardOldestPolicy()
+        )
+        executor.setThreadFactory(NamedThreadFactory("httpclient-$accountName"))
+        val dispatcher = Dispatcher(executor)
+        dispatcher.maxRequests = 100000
+        dispatcher.maxRequestsPerHost = 100000
+        val connectionPool = ConnectionPool(parallelRequests, 5, TimeUnit.MINUTES)
         client = OkHttpClient.Builder().run {
+            protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
+            connectionPool(connectionPool)
             dispatcher(dispatcher)
-            addInterceptor(windowControlInterceptor)
-            addInterceptor(rateLimitInterceptor)
             addInterceptor(requestProcessingTimeInterceptor)
             build()
         }
     }
 
-    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long): Boolean {
-        val ticket = requestCount.incrementAndGet()
-        val t = GetSpeed() * ((paymentOperationTimeout.toMillis() - (now() - paymentStartedAt) - requestAverageProcessingTime.toMillis()).toDouble() / 1000).toLong()
-        if (ticket > t)
-            return false
-        logger.warn("t - $t; ticket - $ticket")
+    private fun paymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
+        logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
 
-        threadPool.submit {
-            logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
+        val transactionId = UUID.randomUUID()
+        logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
 
-            val transactionId = UUID.randomUUID()
-            logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
+        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+        paymentESService.update(paymentId) {
+            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        }
 
-            // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-            // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
-            paymentESService.update(paymentId) {
-                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-            }
+        val request = Request.Builder().run {
+            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
+            header("paymentStartedAt", paymentStartedAt.toString())
+            post(emptyBody)
+        }.build()
 
-            val request = Request.Builder().run {
-                url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
-                header("paymentStartedAt", paymentStartedAt.toString())
-                post(emptyBody)
-            }.build()
-
-            client.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                window.release()
+                responseProcessingThreadPool.submit {
                     when (e) {
                         is SocketTimeoutException -> {
                             paymentESService.update(paymentId) {
@@ -179,15 +187,21 @@ class PaymentExternalServiceImpl(
                             }
                         }
                     }
-                    requestCount.decrementAndGet()
                 }
+            }
 
-                override fun onResponse(call: Call, response: Response) {
+            override fun onResponse(call: Call, response: Response) {
+                window.release()
+                responseProcessingThreadPool.submit {
                     response.use {
                         val body = try {
-                            mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                            if (now() - paymentStartedAt > paymentOperationTimeout.toMillis()) {
+                                logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId - timeout expired. ${now() - paymentStartedAt}")
+                                ExternalSysResponse(false, "")
+                            } else {
+                                mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                            }
                         } catch (e: Exception) {
-                            failedCount += 1
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                             ExternalSysResponse(false, e.message)
                         }
@@ -200,11 +214,13 @@ class PaymentExternalServiceImpl(
                             it.logProcessing(body.result, now(), transactionId, reason = body.message)
                         }
                     }
-                    requestCount.decrementAndGet()
                 }
-            })
-        }
-        return true
+            }
+        })
+    }
+
+    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long): Boolean {
+        return queue.tryEnqueue(RequestData(paymentId, amount, paymentStartedAt))
     }
 }
 

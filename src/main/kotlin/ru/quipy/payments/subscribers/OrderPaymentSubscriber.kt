@@ -36,6 +36,12 @@ class OrderPaymentSubscriber {
     @Autowired
     @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN2)
     private lateinit var paymentService2: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN3)
+    private lateinit var paymentService3: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN4)
+    private lateinit var paymentService4: PaymentService
 
     private val paymentExecutor = Executors.newFixedThreadPool(16, NamedThreadFactory("payment-executor"))
 
@@ -53,9 +59,18 @@ class OrderPaymentSubscriber {
                     }
                     logger.info("Payment ${createdEvent.paymentId} for order ${event.orderId} created.")
 
+                    val services = listOf(paymentService4, paymentService3, paymentService2, paymentService1)
+                    for (service in services)
+                    {
+                        if (service.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
+                            break
+                    }
+
 //                    val t = paymentService2.GetSpeed() * ((PaymentExternalServiceImpl.paymentOperationTimeout.toMillis() - (now() - event.createdAt)).toDouble() / 1000 - 10).toLong()
-                    if (!paymentService2.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
-                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+//                    if (!paymentService2.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
+//                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+//                    if (!paymentService2.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
+//                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
 //                    if (t < 4 * paymentService2.GetRequestCount())
 //                        paymentService1.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
 //                    else
