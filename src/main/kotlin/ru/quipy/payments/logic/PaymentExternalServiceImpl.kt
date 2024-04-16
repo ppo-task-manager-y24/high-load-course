@@ -44,14 +44,14 @@ internal class RequestProcessingTimeInterceptor(
             val paymentStartedAt = paymentStartedAtHeader.toLong()
             val remainingTime = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
             val minn = min(minProcessingTime1, minProcessingTime2)
-//            val average = summary.getAverageMillis()
-            if (minProcessingTime1 != Long.MAX_VALUE && minn > remainingTime) {
-//            if (average != null && average.toMillis() * 0.1 > remainingTime) {
+            val average = summary.getAverageMillis()
+//            if (minProcessingTime1 != Long.MAX_VALUE && minn > remainingTime) {
+            if (average != null && average.toMillis() * 0.5 > remainingTime) {
                 logger.warn("RequestProcessingTimeInterceptor")
                 return Response.Builder()
                     .code(418) // Whatever code
                     .body("".toResponseBody(null)) // Whatever body
-                    .protocol(Protocol.HTTP_2)
+//                    .protocol(Protocol.HTTP_1)
                     .message("Dummy response")
                     .request(chain.request())
                     .build()
@@ -135,8 +135,8 @@ class PaymentExternalServiceImpl(
         )
         executor.setThreadFactory(NamedThreadFactory("httpclient-$accountName"))
         val dispatcher = Dispatcher(executor)
-        dispatcher.maxRequests = 100000
-        dispatcher.maxRequestsPerHost = 100000
+        dispatcher.maxRequests = parallelRequests
+        dispatcher.maxRequestsPerHost = parallelRequests
         val connectionPool = ConnectionPool(parallelRequests, 5, TimeUnit.MINUTES)
         client = OkHttpClient.Builder().run {
             protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))

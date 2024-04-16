@@ -49,7 +49,7 @@ class RateLimiter(
         private val rateLimiterScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
     }
 
-    private val semaphore = java.util.concurrent.Semaphore(rate, true)
+    public val semaphore = java.util.concurrent.Semaphore(rate, true)
 
     private var lastUpdatedTs = now()
 

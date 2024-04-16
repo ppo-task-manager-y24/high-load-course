@@ -30,8 +30,8 @@ class AccountQueue(
 //    private val fallback:
 ) {
     private val executor = ThreadPoolExecutor(
-        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 16, 10, TimeUnit.SECONDS,
-        ArrayBlockingQueue((paymentOperationTimeoutSec * accountSpeed).toInt() * 10),
+        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 8, 100, TimeUnit.SECONDS,
+        ArrayBlockingQueue(10000),
         NamedThreadFactory("queue-$accountName"),
         ThreadPoolExecutor.DiscardOldestPolicy()
     )
@@ -43,8 +43,8 @@ class AccountQueue(
     {
         logger.warn("[$accountName] tryEnqueue for payment ${request.paymentId}. Already passed: ${now() - request.paymentStartedAt} ms")
         val timeBeforeExpiration =
-            paymentOperationTimeoutSec * 1000 - (now() - request.paymentStartedAt) - requestAverageProcessingTimeMs * 2
-        val t = accountSpeed * timeBeforeExpiration / 1000
+            paymentOperationTimeoutSec * 1000 - (now() - request.paymentStartedAt)
+        val t = accountSpeed * (timeBeforeExpiration  - requestAverageProcessingTimeMs) / 1000
 
 
         var result = false
@@ -53,6 +53,8 @@ class AccountQueue(
             size = queue.size
             if (size < t) {
                 result = queue.offer(request)
+                if (result)
+                    logger.warn("[$accountName] tryEnqueue-offered ${request.paymentId}. Already passed: ${now() - request.paymentStartedAt} ms")
             }
         }
         logger.warn("[$accountName] tryEnqueue result - $result,     size - $size,   ${paymentOperationTimeoutSec * accountSpeed},   t - $t")
@@ -70,14 +72,14 @@ class AccountQueue(
     private fun processRequest()
     {
         try {
+//            logger.warn("[$accountName] availablePermits - ${window.availablePermits()}")
             window.acquire()
             rateLimiter.tickBlocking()
 
             val request = queue.poll()
+            logger.warn("[$accountName] tryEnqueue-polled ${request.paymentId}. Already passed: ${now() - request.paymentStartedAt} ms")
 
-            executor1.submit {
-                callback(request.paymentId, request.amount, request.paymentStartedAt)
-            }
+            callback(request.paymentId, request.amount, request.paymentStartedAt)
         }
         catch (e: Exception) {
             logger.error("AccountQueue - ${e.message}")
