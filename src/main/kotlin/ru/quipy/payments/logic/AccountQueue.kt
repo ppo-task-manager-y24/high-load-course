@@ -4,6 +4,7 @@ import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
+import ru.quipy.common.utils.Summary
 import java.util.*
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
@@ -34,10 +35,11 @@ class AccountQueue(
 //    )
     private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
     private val size = AtomicLong(0)
-    private val queue = ArrayBlockingQueue<RequestData>(capacity)
+    private val queue = ArrayBlockingQueue<RequestData>(100000)
 
     private fun processRequest()
     {
+
         executor.submit {
             try {
                 logger.warn("[$accountName] AccountQueue-processRequest: wait")
