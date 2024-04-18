@@ -89,6 +89,11 @@
             <artifactId>tiny-mongo-event-store-spring-boot-starter</artifactId>
             <version>${tiny.es.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-main-kts</artifactId>
+            <version>1.6.21</version>
+        </dependency>
     </dependencies>
 
     <build>
