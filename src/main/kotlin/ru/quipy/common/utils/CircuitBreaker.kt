@@ -72,7 +72,7 @@ class CircuitBreaker(
 
     @Synchronized
     override fun triggerSuccess() {
-        incrementCallCount()
+        incrementSuccessCount()
         when (state) {
             CircuitBreakerState.CLOSED -> {}
             CircuitBreakerState.OPEN -> {}
@@ -91,7 +91,7 @@ class CircuitBreaker(
         }
     }
 
-    private fun incrementCallCount() {
+    private fun incrementSuccessCount() {
         window.add(true)
     }
 
@@ -117,7 +117,7 @@ class CircuitBreaker(
         if (calls.count() < minSize) {
             return null
         }
-        return calls.count { x -> x == true }.toDouble() / calls.size.toDouble()
+        return calls.count { x -> x == false }.toDouble() / calls.size.toDouble()
     }
 
     private fun onStateChange(state: CircuitBreakerState) {
