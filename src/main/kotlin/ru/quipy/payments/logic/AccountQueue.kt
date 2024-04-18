@@ -21,7 +21,9 @@ class AccountQueue(
     private val window: OngoingWindow,
     private val rateLimiter: RateLimiter,
     private val accountName: String,
-    private val callback: (paymentId: UUID, amount: Int, paymentStartedAt: Long) -> Unit
+    private val capacity: Int,
+    private val callback: (paymentId: UUID, amount: Int, paymentStartedAt: Long) -> Unit,
+
 ) {
     private val logger = LoggerFactory.getLogger(AccountQueue::class.java)
 //    private val executor = ThreadPoolExecutor(
@@ -32,6 +34,43 @@ class AccountQueue(
 //    )
     private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
     private val size = AtomicLong(0)
+    private val queue = ArrayBlockingQueue<RequestData>(capacity)
+
+    private fun processRequest()
+    {
+        executor.submit {
+            try {
+                logger.warn("[$accountName] AccountQueue-processRequest: wait")
+                window.acquire()
+                rateLimiter.tickBlocking()
+
+                val request = queue.poll()
+
+                logger.warn("[$accountName] AccountQueue-processRequest: calling ${request.paymentId}. Passed: ${now() - request.paymentStartedAt} ms")
+                callback(request.paymentId, request.amount, request.paymentStartedAt)
+            }
+            catch (e: Exception) {
+                logger.error("[$accountName] AccountQueue: error - ${e.message}")
+                window.release()
+            }
+        }
+    }
+
+    fun tryEnqueue(request: RequestData, allowedNumReqBefore: Long) : Boolean {
+        val s = size.incrementAndGet()
+        if (s <= allowedNumReqBefore) {
+            val result = queue.offer(request)
+            logger.warn("[$accountName] AccountQueue-tryEnqueue: submit ${request.paymentId}. Passed: ${now() - request.paymentStartedAt} ms. result - $result")
+            if (result)
+                processRequest()
+            return result
+        }
+        else {
+            logger.warn("[$accountName] AccountQueue-tryEnqueue: submit ${request.paymentId}. Passed: ${now() - request.paymentStartedAt} ms. result - false")
+            size.decrementAndGet()
+            return false
+        }
+    }
 
     fun enqueue(request: RequestData) {
         size.incrementAndGet()
