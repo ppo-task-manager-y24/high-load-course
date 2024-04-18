@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import CircuitBreaker
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.*
@@ -55,9 +56,16 @@ class PaymentExternalServiceImpl(
 
     private val window = OngoingWindow(parallelRequests)
     private val rateLimiter = RateLimiter(rateLimitPerSec)
+    private val circuitBreaker = CircuitBreaker(
+        "circuitBreaker",
+        0.5,
+        10,
+        5000,
+        10)
     private val queue = AccountQueue(
         window,
         rateLimiter,
+        circuitBreaker,
         accountName,
         (speed * paymentOperationTimeout.toSeconds()).toInt(),
         ::paymentRequest
@@ -110,7 +118,7 @@ class PaymentExternalServiceImpl(
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                queue.deque()
+                queue.deque(false)
                 responseProcessingThreadPool.submit {
                     when (e) {
                         is SocketTimeoutException -> {
@@ -133,7 +141,7 @@ class PaymentExternalServiceImpl(
                 }
             }
             override fun onResponse(call: Call, response: Response) {
-                queue.deque()
+                queue.deque(true)
                 responseProcessingThreadPool.submit {
                     response.use {
                         val body = try {

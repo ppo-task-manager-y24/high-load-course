@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import CircuitBreaker
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
@@ -20,6 +21,7 @@ data class RequestData(
 class AccountQueue(
     private val window: OngoingWindow,
     private val rateLimiter: RateLimiter,
+    private val circuitBreaker: CircuitBreaker,
     private val accountName: String,
     private val capacity: Int,
     private val callback: (paymentId: UUID, amount: Int, paymentStartedAt: Long) -> Unit,
@@ -57,6 +59,8 @@ class AccountQueue(
     }
 
     fun tryEnqueue(request: RequestData, allowedNumReqBefore: Long) : Boolean {
+        if (!circuitBreaker.canExecute())
+            return false
         val s = size.incrementAndGet()
         if (s <= allowedNumReqBefore) {
             val result = queue.offer(request)
@@ -90,10 +94,14 @@ class AccountQueue(
         }
     }
 
-    fun deque() {
+    fun deque(success: Boolean = true) {
         window.release()
         size.decrementAndGet()
         logger.warn("[$accountName] AccountQueue::deque window - ${window.availablePermits()}, size - ${size.get()}")
+        if (success)
+            circuitBreaker.triggerSuccess()
+        else
+            circuitBreaker.triggerFailure()
     }
 
     fun getSize() = size.get()
