@@ -33,8 +33,17 @@ class OrderPaymentSubscriber {
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
     @Autowired
-    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN)
-    private lateinit var paymentService: PaymentService
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN_1)
+    private lateinit var paymentService1: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN_2)
+    private lateinit var paymentService2: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN_3)
+    private lateinit var paymentService3: PaymentService
+    @Autowired
+    @Qualifier(ExternalServicesConfig.PRIMARY_PAYMENT_BEAN_4)
+    private lateinit var paymentService4: PaymentService
 
     private val paymentExecutor = Executors.newFixedThreadPool(16, NamedThreadFactory("payment-executor"))
 
@@ -52,7 +61,7 @@ class OrderPaymentSubscriber {
                     }
                     logger.info("Payment ${createdEvent.paymentId} for order ${event.orderId} created.")
 
-                    paymentService.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+                    paymentService4.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
                 }
             }
         }

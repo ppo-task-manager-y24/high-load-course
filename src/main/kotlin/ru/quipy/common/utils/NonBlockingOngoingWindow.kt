@@ -45,5 +45,7 @@ class OngoingWindow(
         window.acquire()
     }
 
+    fun availablePermits() = window.availablePermits()
+
     fun release() = window.release()
 }

@@ -53,6 +53,8 @@ class RateLimiter(
 
     private var lastUpdatedTs = now()
 
+    fun availablePermits() = semaphore.availablePermits()
+
     private val releaseJob = rateLimiterScope.launch {
         while (true) {
             val started = now()

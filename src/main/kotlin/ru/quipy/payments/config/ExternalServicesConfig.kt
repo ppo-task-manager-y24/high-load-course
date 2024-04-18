@@ -10,7 +10,10 @@ import java.time.Duration
 @Configuration
 class ExternalServicesConfig {
     companion object {
-        const val PRIMARY_PAYMENT_BEAN = "PRIMARY_PAYMENT_BEAN"
+        const val PRIMARY_PAYMENT_BEAN_1 = "PRIMARY_PAYMENT_BEAN_1"
+        const val PRIMARY_PAYMENT_BEAN_2 = "PRIMARY_PAYMENT_BEAN_2"
+        const val PRIMARY_PAYMENT_BEAN_3 = "PRIMARY_PAYMENT_BEAN_3"
+        const val PRIMARY_PAYMENT_BEAN_4 = "PRIMARY_PAYMENT_BEAN_4"
 
         // Ниже приведены готовые конфигурации нескольких аккаунтов провайдера оплаты.
         // Заметьте, что каждый аккаунт обладает своими характеристиками и стоимостью вызова.
@@ -23,6 +26,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 100,
             request95thPercentileProcessingTime = Duration.ofMillis(1000),
         )
+        private val paymentService_1 = PaymentExternalServiceImpl(accountProps_1)
 
         private val accountProps_2 = ExternalServiceProperties(
             // Call costs 70
@@ -32,6 +36,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 30,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_2 = PaymentExternalServiceImpl(accountProps_2)
 
         private val accountProps_3 = ExternalServiceProperties(
             // Call costs 40
@@ -41,6 +46,7 @@ class ExternalServicesConfig {
             rateLimitPerSec = 8,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_3 = PaymentExternalServiceImpl(accountProps_3)
 
         // Call costs 30
         private val accountProps_4 = ExternalServiceProperties(
@@ -50,11 +56,15 @@ class ExternalServicesConfig {
             rateLimitPerSec = 5,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+        private val paymentService_4 = PaymentExternalServiceImpl(accountProps_4)
     }
 
-    @Bean(PRIMARY_PAYMENT_BEAN)
-    fun fastExternalService() =
-        PaymentExternalServiceImpl(
-            accountProps_4,
-        )
+    @Bean(PRIMARY_PAYMENT_BEAN_1)
+    fun fastExternalService1() = paymentService_1
+    @Bean(PRIMARY_PAYMENT_BEAN_2)
+    fun fastExternalService2() = paymentService_2
+    @Bean(PRIMARY_PAYMENT_BEAN_3)
+    fun fastExternalService3() = paymentService_3
+    @Bean(PRIMARY_PAYMENT_BEAN_4)
+    fun fastExternalService4() = paymentService_4
 }
