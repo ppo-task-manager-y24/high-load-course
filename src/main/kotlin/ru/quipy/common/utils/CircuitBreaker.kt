@@ -128,7 +128,8 @@ class CircuitBreaker(
         }
     }
 
-    fun update() {
+    @Synchronized
+    private fun update() {
         if (state == CircuitBreakerState.OPEN && System.currentTimeMillis() - lastStateChangeTime >= resetTimeoutMs) {
             state = CircuitBreakerState.HALF_OPEN
         }
