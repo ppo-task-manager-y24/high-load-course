@@ -61,7 +61,12 @@ class OrderPaymentSubscriber {
                     }
                     logger.info("Payment ${createdEvent.paymentId} for order ${event.orderId} created.")
 
-                    paymentService4.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt)
+                    val services = listOf(paymentService4, paymentService3, paymentService2, paymentService1)
+                    for (service in services)
+                    {
+                        if (service.submitPaymentRequest(createdEvent.paymentId, event.amount, event.createdAt))
+                            break
+                    }
                 }
             }
         }
