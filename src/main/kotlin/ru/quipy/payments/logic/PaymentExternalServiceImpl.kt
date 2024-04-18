@@ -59,6 +59,7 @@ class PaymentExternalServiceImpl(
         window,
         rateLimiter,
         accountName,
+        (speed * paymentOperationTimeout.toSeconds()).toInt(),
         ::paymentRequest
     )
 
@@ -87,11 +88,7 @@ class PaymentExternalServiceImpl(
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) : Boolean {
         val timeBeforeExpiration = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
         val allowedNumReqBefore = (speed * (timeBeforeExpiration - requestAverageProcessingTime.toMillis()) / 1000).toLong()
-        logger.warn("[$accountName] submitPaymentRequest: allowedNumReqBefore - $allowedNumReqBefore, size - ${queue.getSize()}. Passed: ${now() - paymentStartedAt} ms")
-        if (allowedNumReqBefore <= queue.getSize())
-            return false
-        queue.enqueue(RequestData(paymentId, amount, paymentStartedAt))
-        return true
+        return queue.tryEnqueue(RequestData(paymentId, amount, paymentStartedAt), allowedNumReqBefore)
     }
 
     private fun paymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
