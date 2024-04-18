@@ -5,6 +5,7 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
@@ -13,7 +14,10 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 
@@ -38,10 +42,16 @@ class PaymentExternalServiceImpl(
     private val parallelRequests = properties.parallelRequests
     private var speed: Double = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble())
 
+//    private val responseProcessingThreadPool = ThreadPoolExecutor(
+//        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 8, 10, TimeUnit.SECONDS,
+//        ArrayBlockingQueue(10000),
+//        NamedThreadFactory("response-$accountName"),
+//        ThreadPoolExecutor.DiscardOldestPolicy()
+//    )
+    private val responseProcessingThreadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
+
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
-
-    private val httpClientExecutor = Executors.newSingleThreadExecutor()
 
     private val window = OngoingWindow(parallelRequests)
     private val rateLimiter = RateLimiter(rateLimitPerSec)
@@ -55,12 +65,21 @@ class PaymentExternalServiceImpl(
     private lateinit var client: OkHttpClient
 
     init {
+//        val executor = ThreadPoolExecutor(
+//            Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 4, 10, TimeUnit.SECONDS,
+//            ArrayBlockingQueue(10000),
+//            NamedThreadFactory("httpclient-$accountName"),
+//            ThreadPoolExecutor.DiscardOldestPolicy()
+//        )
         val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 4)
         val dispatcher = Dispatcher(executor)
         dispatcher.maxRequests = parallelRequests
         dispatcher.maxRequestsPerHost = parallelRequests
+//        val connectionPool = ConnectionPool(parallelRequests, 5, TimeUnit.MINUTES)
         client = OkHttpClient.Builder().run {
+            protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
             dispatcher(dispatcher)
+//            connectionPool(connectionPool)
             build()
         }
     }
@@ -95,40 +114,45 @@ class PaymentExternalServiceImpl(
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 queue.deque()
-                logger.error("[$accountName] Callback::onFailure window after release ${window.availablePermits()}")
-                when (e) {
-                    is SocketTimeoutException -> {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                responseProcessingThreadPool.submit {
+                    when (e) {
+                        is SocketTimeoutException -> {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                            }
                         }
-                    }
 
-                    else -> {
-                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        else -> {
+                            logger.error(
+                                "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId",
+                                e
+                            )
 
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = e.message)
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = e.message)
+                            }
                         }
                     }
                 }
             }
             override fun onResponse(call: Call, response: Response) {
                 queue.deque()
-                logger.error("[$accountName] Callback::onResponse window after release ${window.availablePermits()}")
-                response.use {
-                    val body = try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                        ExternalSysResponse(false, e.message)
-                    }
+                responseProcessingThreadPool.submit {
+                    response.use {
+                        val body = try {
+                            mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                            ExternalSysResponse(false, e.message)
+                        }
 
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, passed: ${now() - paymentStartedAt}, message: ${body.message}")
+                        logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, passed: ${now() - paymentStartedAt}, message: ${body.message}")
 
-                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                        // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        }
                     }
                 }
             }

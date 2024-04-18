@@ -1,10 +1,14 @@
 package ru.quipy.payments.logic
 
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 data class RequestData(
@@ -20,7 +24,13 @@ class AccountQueue(
     private val callback: (paymentId: UUID, amount: Int, paymentStartedAt: Long) -> Unit
 ) {
     private val logger = LoggerFactory.getLogger(AccountQueue::class.java)
-    private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 4)
+//    private val executor = ThreadPoolExecutor(
+//        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 8, 10, TimeUnit.SECONDS,
+//        ArrayBlockingQueue(10000),
+//        NamedThreadFactory("queue-$accountName"),
+//        ThreadPoolExecutor.DiscardOldestPolicy()
+//    )
+    private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 8)
     private val size = AtomicLong(0)
 
     fun enqueue(request: RequestData) {
@@ -44,6 +54,7 @@ class AccountQueue(
     fun deque() {
         window.release()
         size.decrementAndGet()
+        logger.warn("[$accountName] AccountQueue::deque window - ${window.availablePermits()}, size - ${size.get()}")
     }
 
     fun getSize() = size.get()
