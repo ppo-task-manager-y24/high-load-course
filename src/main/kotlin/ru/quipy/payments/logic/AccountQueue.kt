@@ -5,6 +5,7 @@ import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 data class RequestData(
     val paymentId: UUID,
@@ -20,8 +21,10 @@ class AccountQueue(
 ) {
     private val logger = LoggerFactory.getLogger(AccountQueue::class.java)
     private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 4)
+    private val size = AtomicLong(0)
 
     fun enqueue(request: RequestData) {
+        size.incrementAndGet()
         executor.submit {
             try {
                 logger.warn("[$accountName] AccountQueue: submit ${request.paymentId}. Passed: ${now() - request.paymentStartedAt} ms. Window: ${window.availablePermits()}. Rate limiter: ${rateLimiter.availablePermits()}")
@@ -37,5 +40,12 @@ class AccountQueue(
             }
         }
     }
+
+    fun deque() {
+        window.release()
+        size.decrementAndGet()
+    }
+
+    fun getSize() = size.get()
 
 }

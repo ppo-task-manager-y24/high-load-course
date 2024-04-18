@@ -14,6 +14,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.math.min
 
 
 // Advice: always treat time as a Duration
@@ -35,6 +36,7 @@ class PaymentExternalServiceImpl(
     private val requestAverageProcessingTime = properties.request95thPercentileProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+    private var speed: Double = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble())
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
@@ -63,8 +65,14 @@ class PaymentExternalServiceImpl(
         }
     }
 
-    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
+    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) : Boolean {
+        val timeBeforeExpiration = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
+        val allowedNumReqBefore = (speed * (timeBeforeExpiration - requestAverageProcessingTime.toMillis()) / 1000).toLong()
+        logger.warn("[$accountName] submitPaymentRequest: allowedNumReqBefore - $allowedNumReqBefore, size - ${queue.getSize()}. Passed: ${now() - paymentStartedAt} ms")
+        if (allowedNumReqBefore <= queue.getSize())
+            return false
         queue.enqueue(RequestData(paymentId, amount, paymentStartedAt))
+        return true
     }
 
     private fun paymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
@@ -86,7 +94,7 @@ class PaymentExternalServiceImpl(
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                window.release()
+                queue.deque()
                 logger.error("[$accountName] Callback::onFailure window after release ${window.availablePermits()}")
                 when (e) {
                     is SocketTimeoutException -> {
@@ -105,7 +113,7 @@ class PaymentExternalServiceImpl(
                 }
             }
             override fun onResponse(call: Call, response: Response) {
-                window.release()
+                queue.deque()
                 logger.error("[$accountName] Callback::onResponse window after release ${window.availablePermits()}")
                 response.use {
                     val body = try {
