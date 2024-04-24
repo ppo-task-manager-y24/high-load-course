@@ -63,6 +63,7 @@ class Summary(private val initial: Long, private val activeAfterNExecutions: Int
                 nums.add(v)
             } else {
             }
+            count1++
         }
     }
 
