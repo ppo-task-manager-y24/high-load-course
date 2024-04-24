@@ -3,11 +3,13 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.*
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.RateLimiter
+import ru.quipy.common.utils.Summary
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.io.IOException
@@ -18,8 +20,57 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
+internal class RequestProcessingTimeInterceptor(
+    private val requestAverageProcessingTime: Duration,
+    private val paymentOperationTimeout: Duration,
+    private val summary: Summary
+) : Interceptor {
+    private val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
+    private var minProcessingTime1: Long = Long.MAX_VALUE
+    private var minProcessingTime2: Long = Long.MAX_VALUE
+    private var lastUpdMin: Long = now()
+
+    @Throws(IOException::class)
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+
+        val paymentStartedAtHeader = request.header("paymentStartedAt")
+        if (paymentStartedAtHeader != null) {
+            val paymentStartedAt = paymentStartedAtHeader.toLong()
+            val remainingTime = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
+            val minn = min(minProcessingTime1, minProcessingTime2)
+            if (minProcessingTime1 != Long.MAX_VALUE && minn > remainingTime) {
+                logger.warn("RequestProcessingTimeInterceptor")
+                return Response.Builder()
+                    .code(418) // Whatever code
+                    .body("".toResponseBody(null)) // Whatever body
+                    .protocol(Protocol.HTTP_2)
+                    .message("Dummy response")
+                    .request(chain.request())
+                    .build()
+            }
+        }
+
+        val startProcessingAt = now()
+        val response = chain.proceed(request)
+        summary.reportExecution(now() - startProcessingAt)
+        minProcessingTime2 = min(minProcessingTime2, now() - startProcessingAt)
+
+        if (now() - lastUpdMin < 10000)
+        {
+            minProcessingTime1 = minProcessingTime2
+            minProcessingTime2 = Long.MAX_VALUE
+            lastUpdMin = now()
+        }
+
+        return response
+    }
+
+
+}
 
 // Advice: always treat time as a Duration
 class PaymentExternalServiceImpl(
@@ -40,7 +91,8 @@ class PaymentExternalServiceImpl(
     private val requestAverageProcessingTime = properties.request95thPercentileProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private var speed: Double = min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble())
+
+    private var speed = AtomicReference<Double>(min(parallelRequests.toDouble() / (requestAverageProcessingTime.toMillis().toDouble() / 1000), rateLimitPerSec.toDouble()))
 
 //    private val responseProcessingThreadPool = ThreadPoolExecutor(
 //        Runtime.getRuntime().availableProcessors(), Runtime.getRuntime().availableProcessors() * 8, 10, TimeUnit.SECONDS,
@@ -53,13 +105,16 @@ class PaymentExternalServiceImpl(
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
+    private val summary = Summary(requestAverageProcessingTime.toMillis(), 100)
+    private val requestProcessingTimeInterceptor = RequestProcessingTimeInterceptor(requestAverageProcessingTime, paymentOperationTimeout, summary)
+
     private val window = OngoingWindow(parallelRequests)
     private val rateLimiter = RateLimiter(rateLimitPerSec)
     private val queue = AccountQueue(
         window,
         rateLimiter,
         accountName,
-        (speed * paymentOperationTimeout.toSeconds()).toInt(),
+        (speed.get() * paymentOperationTimeout.toSeconds()).toInt(),
         ::paymentRequest
     )
 
@@ -80,14 +135,17 @@ class PaymentExternalServiceImpl(
         client = OkHttpClient.Builder().run {
             protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
             dispatcher(dispatcher)
+            addInterceptor(requestProcessingTimeInterceptor)
 //            connectionPool(connectionPool)
             build()
         }
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) : Boolean {
+        val c95thPercentile = summary.get95thPercentile()
+        speed.set(min(parallelRequests.toDouble() / (c95thPercentile.toDouble() / 1000), rateLimitPerSec.toDouble()))
         val timeBeforeExpiration = paymentOperationTimeout.toMillis() - (now() - paymentStartedAt)
-        val allowedNumReqBefore = (speed * (timeBeforeExpiration - requestAverageProcessingTime.toMillis()) / 1000).toLong()
+        val allowedNumReqBefore = (speed.get() * (timeBeforeExpiration - c95thPercentile) / 1000).toLong()
         return queue.tryEnqueue(RequestData(paymentId, amount, paymentStartedAt), allowedNumReqBefore)
     }
 
